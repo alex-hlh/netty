@@ -783,6 +783,17 @@
         <optional>true</optional>
       </dependency>
 
+      <!--
+        Completely optional and only needed for ALPN.
+      -->
+      <dependency>
+        <groupId>org.bouncycastle</groupId>
+        <artifactId>bctls-jdk15on</artifactId>
+        <version>1.69</version>
+        <scope>compile</scope>
+        <optional>true</optional>
+      </dependency>
+
       <dependency>
         <groupId>com.fasterxml</groupId>
         <artifactId>aalto-xml</artifactId>
@@ -827,7 +838,17 @@
       </dependency>
       <dependency>
         <groupId>com.aayushatharva.brotli4j</groupId>
+        <artifactId>native-linux-aarch64</artifactId>
+        <version>${brotli4j.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.aayushatharva.brotli4j</groupId>
         <artifactId>native-osx-x86_64</artifactId>
+        <version>${brotli4j.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.aayushatharva.brotli4j</groupId>
+        <artifactId>native-osx-aarch64</artifactId>
         <version>${brotli4j.version}</version>
       </dependency>
       <dependency>
@@ -1837,8 +1858,8 @@
         </plugin>
         <plugin>
           <groupId>org.fusesource.hawtjni</groupId>
-          <artifactId>maven-hawtjni-plugin</artifactId>
-          <version>1.14</version>
+          <artifactId>hawtjni-maven-plugin</artifactId>
+          <version>1.18</version>
         </plugin>
         <plugin>
           <groupId>kr.motd.maven</groupId>
@@ -1928,7 +1949,7 @@
                 <pluginExecution>
                   <pluginExecutionFilter>
                     <groupId>org.fusesource.hawtjni</groupId>
-                    <artifactId>maven-hawtjni-plugin</artifactId>
+                    <artifactId>hawtjni-maven-plugin</artifactId>
                     <versionRange>[1.10,)</versionRange>
                     <goals>
                       <goal>generate</goal>

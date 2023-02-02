@@ -233,7 +233,8 @@ abstract class DnsResolveContext<T> {
                         }
                     } else {
                         if (DnsNameResolver.isTransportOrTimeoutError(cause)) {
-                            promise.tryFailure(new SearchDomainUnknownHostException(cause, hostname, searchDomains));
+                            promise.tryFailure(new SearchDomainUnknownHostException(cause, hostname, expectedTypes,
+                                    searchDomains));
                         } else if (searchDomainIdx < searchDomains.length) {
                             Promise<List<T>> newPromise = parent.executor().newPromise();
                             newPromise.addListener(this);
@@ -241,7 +242,8 @@ abstract class DnsResolveContext<T> {
                         } else if (!startWithoutSearchDomain) {
                             internalResolve(hostname, promise);
                         } else {
-                            promise.tryFailure(new SearchDomainUnknownHostException(cause, hostname, searchDomains));
+                            promise.tryFailure(new SearchDomainUnknownHostException(cause, hostname, expectedTypes,
+                                    searchDomains));
                         }
                     }
                 }
@@ -262,9 +264,11 @@ abstract class DnsResolveContext<T> {
     private static final class SearchDomainUnknownHostException extends UnknownHostException {
         private static final long serialVersionUID = -8573510133644997085L;
 
-        SearchDomainUnknownHostException(Throwable cause, String originalHostname, String[] searchDomains) {
-            super("Failed to resolve '" + originalHostname + "' and search domain query for configured domains" +
-                    " failed as well: " + Arrays.toString(searchDomains));
+        SearchDomainUnknownHostException(Throwable cause, String originalHostname,
+                DnsRecordType[] queryTypes, String[] searchDomains) {
+            super("Failed to resolve '" + originalHostname + "' " + Arrays.toString(queryTypes) +
+                    " and search domain query for configured domains failed as well: " +
+                    Arrays.toString(searchDomains));
             setStackTrace(cause.getStackTrace());
             // Preserve the cause
             initCause(cause.getCause());
@@ -272,7 +276,7 @@ abstract class DnsResolveContext<T> {
 
         // Suppress a warning since this method doesn't need synchronization
         @Override
-        public Throwable fillInStackTrace() {   // lgtm[java/non-sync-override]
+        public Throwable fillInStackTrace() {
             return this;
         }
     }
@@ -787,6 +791,7 @@ abstract class DnsResolveContext<T> {
 
         boolean found = false;
         boolean completeEarly = this.completeEarly;
+        boolean cnameNeedsFollow = !cnames.isEmpty();
         for (int i = 0; i < answerCount; i ++) {
             final DnsRecord r = response.recordAt(DnsSection.ANSWER, i);
             final DnsRecordType type = r.type();
@@ -813,6 +818,8 @@ abstract class DnsResolveContext<T> {
                 do {
                     resolved = cnamesCopy.remove(resolved);
                     if (recordName.equals(resolved)) {
+                        // We followed a CNAME chain that was part of the response without any extra queries.
+                        cnameNeedsFollow = false;
                         break;
                     }
                 } while (resolved != null);
@@ -886,14 +893,14 @@ abstract class DnsResolveContext<T> {
             // Note that we do not break from the loop here, so we decode/cache all A/AAAA records.
         }
 
-        if (cnames.isEmpty()) {
-            if (found) {
-                if (completeEarly) {
-                    this.completeEarly = true;
-                }
-                queryLifecycleObserver.querySucceed();
-                return;
+        if (found && !cnameNeedsFollow) {
+            // If we found the correct result we can just stop here without following any extra CNAME records in the
+            // response.
+            if (completeEarly) {
+                this.completeEarly = true;
             }
+            queryLifecycleObserver.querySucceed();
+        } else if (cnames.isEmpty()) {
             queryLifecycleObserver.queryFailed(NO_MATCHING_RECORD_QUERY_FAILED_EXCEPTION);
         } else {
             queryLifecycleObserver.querySucceed();
@@ -1018,7 +1025,7 @@ abstract class DnsResolveContext<T> {
             queryLifecycleObserver.queryCancelled(allowedQueries);
         }
 
-        // We have at least one resolved record or tried CNAME as the last resort..
+        // We have at least one resolved record or tried CNAME as the last resort.
         finishResolve(promise, cause);
     }
 
@@ -1054,7 +1061,7 @@ abstract class DnsResolveContext<T> {
         final int tries = maxAllowedQueries - allowedQueries;
         final StringBuilder buf = new StringBuilder(64);
 
-        buf.append("Failed to resolve '").append(hostname).append('\'');
+        buf.append("Failed to resolve '").append(hostname).append("' ").append(Arrays.toString(expectedTypes));
         if (tries > 1) {
             if (tries < maxAllowedQueries) {
                 buf.append(" after ")
