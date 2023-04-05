@@ -30,6 +30,7 @@ import io.netty.util.ByteProcessor;
 import io.netty.util.internal.StringUtil;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Decodes {@link ByteBuf}s into {@link HttpMessage}s and
@@ -150,7 +151,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
     private HttpMessage message;
     private long chunkSize;
     private long contentLength = Long.MIN_VALUE;
-    private volatile boolean resetRequested;
+    private final AtomicBoolean resetRequested = new AtomicBoolean();
 
     // These will be updated by splitHeader(...)
     private AsciiString name;
@@ -258,7 +259,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
 
     @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf buffer, List<Object> out) throws Exception {
-        if (resetRequested) {
+        if (resetRequested.get()) {
             resetNow();
         }
 
@@ -463,7 +464,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
     protected void decodeLast(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
         super.decodeLast(ctx, in, out);
 
-        if (resetRequested) {
+        if (resetRequested.get()) {
             // If a reset was requested by decodeLast() we need to do it now otherwise we may produce a
             // LastHttpContent while there was already one.
             resetNow();
@@ -569,7 +570,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
      * This method is useful for handling a rejected request with {@code Expect: 100-continue} header.
      */
     public void reset() {
-        resetRequested = true;
+        resetRequested.lazySet(true);
     }
 
     private void resetNow() {
@@ -589,7 +590,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             }
         }
 
-        resetRequested = false;
+        resetRequested.lazySet(false);
         currentState = State.SKIP_CONTROL_CHARS;
     }
 
@@ -798,16 +799,41 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
     protected abstract HttpMessage createMessage(String[] initialLine) throws Exception;
     protected abstract HttpMessage createInvalidMessage();
 
+    /**
+     * It skips any whitespace char and return the number of skipped bytes.
+     */
+    private static int skipWhiteSpaces(byte[] hex, int start, int length) {
+        for (int i = 0; i < length; i++) {
+            if (!isWhitespace(hex[start + i])) {
+                return i;
+            }
+        }
+        return length;
+    }
+
     private static int getChunkSize(byte[] hex, int start, int length) {
-        // byte[] is produced by LineParse::parseLine that already skip ISO CTRL and Whitespace chars
+        // trim the leading bytes if white spaces, if any
+        final int skipped = skipWhiteSpaces(hex, start, length);
+        if (skipped == length) {
+            // empty case
+            throw new NumberFormatException();
+        }
+        start += skipped;
+        length -= skipped;
         int result = 0;
         for (int i = 0; i < length; i++) {
             final int digit = StringUtil.decodeHexNibble(hex[start + i]);
             if (digit == -1) {
                 // uncommon path
-                if (hex[start + i] == ';') {
+                final byte b = hex[start + i];
+                if (b == ';' || isControlOrWhitespaceAsciiChar(b)) {
+                    if (i == 0) {
+                        // empty case
+                        throw new NumberFormatException();
+                    }
                     return result;
                 }
+                // non-hex char fail-fast path
                 throw new NumberFormatException();
             }
             result *= 16;
@@ -1015,10 +1041,13 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             final int readableBytes = buffer.readableBytes();
             final int readerIndex = buffer.readerIndex();
             final int maxBodySize = maxLength - size;
+            assert maxBodySize >= 0;
             // adding 2 to account for both CR (if present) and LF
-            final int maxBodySizeWithCRLF = maxBodySize + 2;
-            final int toProcess = Math.min(maxBodySizeWithCRLF, readableBytes);
+            // don't remove 2L: it's key to cover maxLength = Integer.MAX_VALUE
+            final long maxBodySizeWithCRLF = maxBodySize + 2L;
+            final int toProcess = (int) Math.min(maxBodySizeWithCRLF, readableBytes);
             final int toIndexExclusive = readerIndex + toProcess;
+            assert toIndexExclusive >= readerIndex;
             final int indexOfLf = buffer.indexOf(readerIndex, toIndexExclusive, HttpConstants.LF);
             if (indexOfLf == -1) {
                 if (readableBytes > maxBodySize) {
@@ -1123,4 +1152,8 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             return ISO_CONTROL_OR_WHITESPACE[128 + value];
         }
     };
+
+    private static boolean isControlOrWhitespaceAsciiChar(byte b) {
+        return ISO_CONTROL_OR_WHITESPACE[128 + b];
+    }
 }
