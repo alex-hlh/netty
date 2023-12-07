@@ -44,8 +44,8 @@
 #define MSG_FASTOPEN 0x20000000
 #endif
 
-static jclass datagramSocketAddressClass = NULL;
-static jclass domainDatagramSocketAddressClass = NULL;
+static jweak datagramSocketAddressClassWeak = NULL;
+static jweak domainDatagramSocketAddressClassWeak = NULL;
 static jmethodID datagramSocketAddrMethodId = NULL;
 static jmethodID domainDatagramSocketAddrMethodId = NULL;
 static jmethodID inetSocketAddrMethodId = NULL;
@@ -61,7 +61,7 @@ extern int accept4(int sockFd, struct sockaddr* addr, socklen_t* addrlen, int fl
 // see sys/un.h#SUN_LEN, this is modified to allow nul bytes
 #define _UNIX_ADDR_LENGTH(path_len) ((uintptr_t) offsetof(struct sockaddr_un, sun_path) + (uintptr_t) path_len)
 
-static int nettyNonBlockingSocket(int domain, int type, int protocol) {
+int netty_unix_socket_nonBlockingSocket(int domain, int type, int protocol) {
 #ifdef SOCK_NONBLOCK
     return socket(domain, type | SOCK_NONBLOCK, protocol);
 #else
@@ -90,6 +90,8 @@ int netty_unix_socket_ipAddressLength(const struct sockaddr_storage* addr) {
 }
 
 static jobject createDatagramSocketAddress(JNIEnv* env, const struct sockaddr_storage* addr, int len, jobject local) {
+    jclass datagramSocketAddressClass = NULL;
+    jobject obj  = NULL;
     int port;
     int scopeId;
     int ipLength = netty_unix_socket_ipAddressLength(addr);
@@ -117,14 +119,23 @@ static jobject createDatagramSocketAddress(JNIEnv* env, const struct sockaddr_st
         jbyte* addr = (jbyte*) &s->sin6_addr.s6_addr;
         (*env)->SetByteArrayRegion(env, addressBytes, 0, ipLength, addr + offset);
     }
-    jobject obj = (*env)->NewObject(env, datagramSocketAddressClass, datagramSocketAddrMethodId, addressBytes, scopeId, port, len, local);
+
+    NETTY_JNI_UTIL_NEW_LOCAL_FROM_WEAK(env, datagramSocketAddressClass, datagramSocketAddressClassWeak, done);
+
+    obj = (*env)->NewObject(env, datagramSocketAddressClass, datagramSocketAddrMethodId, addressBytes, scopeId, port, len, local);
     if ((*env)->ExceptionCheck(env) == JNI_TRUE) {
-        return NULL;
+        obj = NULL;
+        goto done;
     }
+done:
+    NETTY_JNI_UTIL_DELETE_LOCAL(env, datagramSocketAddressClass);
+
     return obj;
 }
 
 static jobject createDomainDatagramSocketAddress(JNIEnv* env, const struct sockaddr_storage* addr, int len, jobject local) {
+    jclass domainDatagramSocketAddressClass = NULL;
+    jobject obj  = NULL;
     struct sockaddr_un* s = (struct sockaddr_un*) addr;
     int pathLength = strlen(s->sun_path);
     jbyteArray pathBytes = (*env)->NewByteArray(env, pathLength);
@@ -133,11 +144,29 @@ static jobject createDomainDatagramSocketAddress(JNIEnv* env, const struct socka
     }
 
     (*env)->SetByteArrayRegion(env, pathBytes, 0, pathLength, (jbyte*) &s->sun_path);
-    jobject obj = (*env)->NewObject(env, domainDatagramSocketAddressClass, domainDatagramSocketAddrMethodId, pathBytes, len, local);
+
+    NETTY_JNI_UTIL_NEW_LOCAL_FROM_WEAK(env, domainDatagramSocketAddressClass, domainDatagramSocketAddressClassWeak, done);
+
+    obj = (*env)->NewObject(env, domainDatagramSocketAddressClass, domainDatagramSocketAddrMethodId, pathBytes, len, local);
     if ((*env)->ExceptionCheck(env) == JNI_TRUE) {
         return NULL;
     }
+done:
+    NETTY_JNI_UTIL_DELETE_LOCAL(env, domainDatagramSocketAddressClass);
+
     return obj;
+}
+
+static jbyteArray netty_unix_socket_createDomainSocketAddressArray(JNIEnv* env, const struct sockaddr_storage* addr) {
+    struct sockaddr_un* s = (struct sockaddr_un*) addr;
+    int pathLength = strlen(s->sun_path);
+    jbyteArray pathBytes = (*env)->NewByteArray(env, pathLength);
+    if (pathBytes == NULL) {
+        return NULL;
+    }
+
+    (*env)->SetByteArrayRegion(env, pathBytes, 0, pathLength, (jbyte*) &s->sun_path);
+    return pathBytes;
 }
 
 static jsize addressLength(const struct sockaddr_storage* addr) {
@@ -214,7 +243,7 @@ static jboolean netty_unix_socket_isIPv6Preferred0(JNIEnv* env, jclass clazz, jb
         return JNI_FALSE;
     }
 
-    int fd = nettyNonBlockingSocket(AF_INET6, SOCK_STREAM, 0);
+    int fd = netty_unix_socket_nonBlockingSocket(AF_INET6, SOCK_STREAM, 0);
     if (fd == -1) {
         return errno == EAFNOSUPPORT ? JNI_FALSE : JNI_TRUE;
     }
@@ -260,7 +289,7 @@ static int netty_unix_socket_setOption0(jint fd, int level, int optname, const v
 }
 
 static jint _socket(JNIEnv* env, jclass clazz, int domain, int type) {
-    int fd = nettyNonBlockingSocket(domain, type, 0);
+    int fd = netty_unix_socket_nonBlockingSocket(domain, type, 0);
     if (fd == -1) {
         return -errno;
     } else if (domain == AF_INET6) {
@@ -663,7 +692,7 @@ static jint netty_unix_socket_accept(JNIEnv* env, jclass clazz, jint fd, jbyteAr
 }
 
 static jbyteArray netty_unix_socket_remoteAddress(JNIEnv* env, jclass clazz, jint fd) {
-    struct sockaddr_storage addr;
+    struct sockaddr_storage addr = { 0 };
     socklen_t len = sizeof(addr);
     if (getpeername(fd, (struct sockaddr*) &addr, &len) == -1) {
         return NULL;
@@ -671,13 +700,31 @@ static jbyteArray netty_unix_socket_remoteAddress(JNIEnv* env, jclass clazz, jin
     return netty_unix_socket_createInetSocketAddressArray(env, &addr);
 }
 
+static jbyteArray netty_unix_socket_remoteDomainSocketAddress(JNIEnv* env, jclass clazz, jint fd) {
+    struct sockaddr_storage addr = { 0 };
+    socklen_t len = sizeof(addr);
+    if (getpeername(fd, (struct sockaddr*) &addr, &len) == -1) {
+        return NULL;
+    }
+    return netty_unix_socket_createDomainSocketAddressArray(env, &addr);
+}
+
 static jbyteArray netty_unix_socket_localAddress(JNIEnv* env, jclass clazz, jint fd) {
-    struct sockaddr_storage addr;
+    struct sockaddr_storage addr = { 0 };
     socklen_t len = sizeof(addr);
     if (getsockname(fd, (struct sockaddr*) &addr, &len) == -1) {
         return NULL;
     }
     return netty_unix_socket_createInetSocketAddressArray(env, &addr);
+}
+
+static jbyteArray netty_unix_socket_localDomainSocketAddress(JNIEnv* env, jclass clazz, jint fd) {
+    struct sockaddr_storage addr = { 0 };
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, (struct sockaddr*) &addr, &len) == -1) {
+        return NULL;
+    }
+    return netty_unix_socket_createDomainSocketAddressArray(env, &addr);
 }
 
 static jint netty_unix_socket_newSocketDgramFd(JNIEnv* env, jclass clazz, jboolean ipv6) {
@@ -691,7 +738,7 @@ static jint netty_unix_socket_newSocketStreamFd(JNIEnv* env, jclass clazz, jbool
 }
 
 static jint netty_unix_socket_newSocketDomainFd(JNIEnv* env, jclass clazz) {
-    int fd = nettyNonBlockingSocket(PF_UNIX, SOCK_STREAM, 0);
+    int fd = netty_unix_socket_nonBlockingSocket(PF_UNIX, SOCK_STREAM, 0);
     if (fd == -1) {
         return -errno;
     }
@@ -699,7 +746,7 @@ static jint netty_unix_socket_newSocketDomainFd(JNIEnv* env, jclass clazz) {
 }
 
 static jint netty_unix_socket_newSocketDomainDgramFd(JNIEnv* env, jclass clazz) {
-    int fd = nettyNonBlockingSocket(PF_UNIX, SOCK_DGRAM, 0);
+    int fd = netty_unix_socket_nonBlockingSocket(PF_UNIX, SOCK_DGRAM, 0);
     if (fd == -1) {
         return -errno;
     }
@@ -813,16 +860,17 @@ static jint netty_unix_socket_bindDomainSocket(JNIEnv* env, jclass clazz, jint f
     jint socket_path_len = (*env)->GetArrayLength(env, socketPath);
 
     if (socket_path_len > sizeof(addr.sun_path) || (socket_path_len == sizeof(addr.sun_path) && socket_path[socket_path_len] != '\0')) {
+        (*env)->ReleaseByteArrayElements(env, socketPath, socket_path, 0);
         return -ENAMETOOLONG;
     }
     memcpy(addr.sun_path, socket_path, socket_path_len);
+    (*env)->ReleaseByteArrayElements(env, socketPath, socket_path, 0);
 
     if (unlink((const char*) addr.sun_path) == -1 && errno != ENOENT) {
         return -errno;
     }
 
     int res = bind(fd, (struct sockaddr*) &addr, _UNIX_ADDR_LENGTH(socket_path_len));
-    (*env)->ReleaseByteArrayElements(env, socketPath, socket_path, 0);
 
     if (res == -1) {
         return -errno;
@@ -841,17 +889,17 @@ static jint netty_unix_socket_connectDomainSocket(JNIEnv* env, jclass clazz, jin
     socket_path_len = (*env)->GetArrayLength(env, socketPath);
 
     if (socket_path_len > sizeof(addr.sun_path) || (socket_path_len == sizeof(addr.sun_path) && socket_path[socket_path_len] != '\0')) {
+        (*env)->ReleaseByteArrayElements(env, socketPath, socket_path, 0);
         return -ENAMETOOLONG;
     }
     memcpy(addr.sun_path, socket_path, socket_path_len);
+    (*env)->ReleaseByteArrayElements(env, socketPath, socket_path, 0);
 
     int res;
     int err;
     do {
         res = connect(fd, (struct sockaddr*) &addr, _UNIX_ADDR_LENGTH(socket_path_len));
     } while (res == -1 && ((err = errno) == EINTR));
-
-    (*env)->ReleaseByteArrayElements(env, socketPath, socket_path, 0);
 
     if (res < 0) {
         return -err;
@@ -1152,6 +1200,8 @@ static const JNINativeMethod fixed_method_table[] = {
   { "accept", "(I[B)I", (void *) netty_unix_socket_accept },
   { "remoteAddress", "(I)[B", (void *) netty_unix_socket_remoteAddress },
   { "localAddress", "(I)[B", (void *) netty_unix_socket_localAddress },
+  { "remoteDomainSocketAddress", "(I)[B", (void *) netty_unix_socket_remoteDomainSocketAddress },
+  { "localDomainSocketAddress", "(I)[B", (void *) netty_unix_socket_localDomainSocketAddress },
   { "newSocketDgramFd", "(Z)I", (void *) netty_unix_socket_newSocketDgramFd },
   { "newSocketStreamFd", "(Z)I", (void *) netty_unix_socket_newSocketStreamFd },
   { "newSocketDomainFd", "()I", (void *) netty_unix_socket_newSocketDomainFd },
@@ -1263,6 +1313,9 @@ jint netty_unix_socket_JNI_OnLoad(JNIEnv* env, const char* packagePrefix) {
     int ret = JNI_ERR;
     char* nettyClassName = NULL;
     void* mem = NULL;
+    jclass datagramSocketAddressClass = NULL;
+    jclass domainDatagramSocketAddressClass = NULL;
+
     JNINativeMethod* dynamicMethods = createDynamicMethodsTable(packagePrefix);
     if (dynamicMethods == NULL) {
         goto done;
@@ -1276,7 +1329,9 @@ jint netty_unix_socket_JNI_OnLoad(JNIEnv* env, const char* packagePrefix) {
     }
   
     NETTY_JNI_UTIL_PREPEND(packagePrefix, "io/netty/channel/unix/DatagramSocketAddress", nettyClassName, done);
-    NETTY_JNI_UTIL_LOAD_CLASS(env, datagramSocketAddressClass, nettyClassName, done);
+
+    NETTY_JNI_UTIL_LOAD_CLASS_WEAK(env, datagramSocketAddressClassWeak, nettyClassName, done);
+    NETTY_JNI_UTIL_NEW_LOCAL_FROM_WEAK(env, datagramSocketAddressClass, datagramSocketAddressClassWeak, done);
 
     // Respect shading...
     char parameters[1024] = {0};
@@ -1285,7 +1340,9 @@ jint netty_unix_socket_JNI_OnLoad(JNIEnv* env, const char* packagePrefix) {
     NETTY_JNI_UTIL_GET_METHOD(env, datagramSocketAddressClass, datagramSocketAddrMethodId, "<init>", parameters, done);
 
     NETTY_JNI_UTIL_PREPEND(packagePrefix, "io/netty/channel/unix/DomainDatagramSocketAddress", nettyClassName, done);
-    NETTY_JNI_UTIL_LOAD_CLASS(env, domainDatagramSocketAddressClass, nettyClassName, done);
+
+    NETTY_JNI_UTIL_LOAD_CLASS_WEAK(env, domainDatagramSocketAddressClassWeak, nettyClassName, done);
+    NETTY_JNI_UTIL_NEW_LOCAL_FROM_WEAK(env, domainDatagramSocketAddressClass, domainDatagramSocketAddressClassWeak, done);
 
     char parameters1[1024] = {0};
     snprintf(parameters1, sizeof(parameters1), "([BIL%s;)V", nettyClassName);
@@ -1312,12 +1369,16 @@ done:
     netty_jni_util_free_dynamic_methods_table(dynamicMethods, fixed_method_table_size, dynamicMethodsTableSize());
     free(nettyClassName);
     free(mem);
+
+    NETTY_JNI_UTIL_DELETE_LOCAL(env, datagramSocketAddressClass);
+    NETTY_JNI_UTIL_DELETE_LOCAL(env, domainDatagramSocketAddressClass);
+
     return ret;
 }
 
 void netty_unix_socket_JNI_OnUnLoad(JNIEnv* env, const char* packagePrefix) {
-    NETTY_JNI_UTIL_UNLOAD_CLASS(env, datagramSocketAddressClass);
-    NETTY_JNI_UTIL_UNLOAD_CLASS(env, domainDatagramSocketAddressClass);
+    NETTY_JNI_UTIL_UNLOAD_CLASS_WEAK(env, datagramSocketAddressClassWeak);
+    NETTY_JNI_UTIL_UNLOAD_CLASS_WEAK(env, domainDatagramSocketAddressClassWeak);
     NETTY_JNI_UTIL_UNLOAD_CLASS(env, inetSocketAddressClass);
 
     netty_jni_util_unregister_natives(env, packagePrefix, SOCKET_CLASSNAME);

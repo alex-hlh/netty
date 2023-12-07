@@ -46,7 +46,6 @@ import static java.lang.Math.min;
  * <p>
  * All methods must be called by a transport implementation from an I/O thread, except the following ones:
  * <ul>
- * <li>{@link #size()} and {@link #isEmpty()}</li>
  * <li>{@link #isWritable()}</li>
  * <li>{@link #getUserDefinedWritability(int)} and {@link #setUserDefinedWritability(int, boolean)}</li>
  * </ul>
@@ -247,7 +246,7 @@ public final class ChannelOutboundBuffer {
         assert p != null;
         final Class<?> promiseClass = p.getClass();
         // fast-path to save O(n) ChannelProgressivePromise's type check on OpenJDK
-        if (promiseClass == VoidChannelPromise.class) {
+        if (promiseClass == VoidChannelPromise.class || promiseClass == DefaultChannelPromise.class) {
             return;
         }
         // this is going to save from type pollution due to https://bugs.openjdk.org/browse/JDK-8180450
@@ -747,14 +746,12 @@ public final class ChannelOutboundBuffer {
      * This quantity will always be non-negative. If {@link #isWritable()} is {@code false} then 0.
      */
     public long bytesBeforeUnwritable() {
-        long bytes = channel.config().getWriteBufferHighWaterMark() - totalPendingSize;
+        // +1 because writability doesn't change until the threshold is crossed (not equal to).
+        long bytes = channel.config().getWriteBufferHighWaterMark() - totalPendingSize + 1;
         // If bytes is negative we know we are not writable, but if bytes is non-negative we have to check writability.
         // Note that totalPendingSize and isWritable() use different volatile variables that are not synchronized
         // together. totalPendingSize will be updated before isWritable().
-        if (bytes > 0) {
-            return isWritable() ? bytes : 0;
-        }
-        return 0;
+        return bytes > 0 && isWritable() ? bytes : 0;
     }
 
     /**
@@ -762,14 +759,12 @@ public final class ChannelOutboundBuffer {
      * This quantity will always be non-negative. If {@link #isWritable()} is {@code true} then 0.
      */
     public long bytesBeforeWritable() {
-        long bytes = totalPendingSize - channel.config().getWriteBufferLowWaterMark();
+        // +1 because writability doesn't change until the threshold is crossed (not equal to).
+        long bytes = totalPendingSize - channel.config().getWriteBufferLowWaterMark() + 1;
         // If bytes is negative we know we are writable, but if bytes is non-negative we have to check writability.
         // Note that totalPendingSize and isWritable() use different volatile variables that are not synchronized
         // together. totalPendingSize will be updated before isWritable().
-        if (bytes > 0) {
-            return isWritable() ? 0 : bytes;
-        }
-        return 0;
+        return bytes <= 0 || isWritable() ? 0 : bytes;
     }
 
     /**

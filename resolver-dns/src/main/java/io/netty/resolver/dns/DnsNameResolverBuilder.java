@@ -24,7 +24,10 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.resolver.HostsFileEntriesResolver;
 import io.netty.resolver.ResolvedAddressTypes;
 import io.netty.util.concurrent.Future;
+import io.netty.util.internal.EmptyArrays;
 import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.net.SocketAddress;
 import java.util.ArrayList;
@@ -38,6 +41,9 @@ import static io.netty.util.internal.ObjectUtil.intValue;
  * A {@link DnsNameResolver} builder.
  */
 public final class DnsNameResolverBuilder {
+
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(DnsNameResolverBuilder.class);
+
     volatile EventLoop eventLoop;
     private ChannelFactory<? extends DatagramChannel> channelFactory;
     private ChannelFactory<? extends SocketChannel> socketChannelFactory;
@@ -100,6 +106,8 @@ public final class DnsNameResolverBuilder {
 
     /**
      * Sets the {@link ChannelFactory} that will create a {@link DatagramChannel}.
+     * If <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a> should be supported as well it is required
+     * to call the {@link #socketChannelFactory(ChannelFactory) or {@link #socketChannelType(Class)}} method.
      *
      * @param channelFactory the {@link ChannelFactory}
      * @return {@code this}
@@ -112,6 +120,8 @@ public final class DnsNameResolverBuilder {
     /**
      * Sets the {@link ChannelFactory} as a {@link ReflectiveChannelFactory} of this type.
      * Use as an alternative to {@link #channelFactory(ChannelFactory)}.
+     * If <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a> should be supported as well it is required
+     * to call the {@link #socketChannelFactory(ChannelFactory) or {@link #socketChannelType(Class)}} method.
      *
      * @param channelType the type
      * @return {@code this}
@@ -124,8 +134,12 @@ public final class DnsNameResolverBuilder {
      * Sets the {@link ChannelFactory} that will create a {@link SocketChannel} for
      * <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a> if needed.
      *
+     * TCP fallback is <strong>not</strong> enabled by default and must be enabled by providing a non-null
+     * {@link ChannelFactory} for this method.
+     *
      * @param channelFactory the {@link ChannelFactory} or {@code null}
      *                       if <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a> should not be supported.
+     *                       By default, TCP fallback is not enabled.
      * @return {@code this}
      */
     public DnsNameResolverBuilder socketChannelFactory(ChannelFactory<? extends SocketChannel> channelFactory) {
@@ -138,8 +152,11 @@ public final class DnsNameResolverBuilder {
      * <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a> if needed.
      * Use as an alternative to {@link #socketChannelFactory(ChannelFactory)}.
      *
+     * TCP fallback is <strong>not</strong> enabled by default and must be enabled by providing a non-null
+     * {@code channelType} for this method.
+     *
      * @param channelType the type or {@code null} if <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a>
-     *                    should not be supported.
+     *                    should not be supported. By default, TCP fallback is not enabled.
      * @return {@code this}
      */
     public DnsNameResolverBuilder socketChannelType(Class<? extends SocketChannel> channelType) {
@@ -247,6 +264,7 @@ public final class DnsNameResolverBuilder {
 
     /**
      * Sets the timeout of each DNS query performed by this resolver (in milliseconds).
+     * {@code 0} disables the timeout. If not set or a negative number is set, the default timeout is used.
      *
      * @param queryTimeoutMillis the query timeout
      * @return {@code this}
@@ -421,7 +439,7 @@ public final class DnsNameResolverBuilder {
             list.add(f);
         }
 
-        this.searchDomains = list.toArray(new String[0]);
+        this.searchDomains = list.toArray(EmptyArrays.EMPTY_STRINGS);
         return this;
     }
 
@@ -491,11 +509,15 @@ public final class DnsNameResolverBuilder {
         }
 
         if (resolveCache != null && (minTtl != null || maxTtl != null || negativeTtl != null)) {
-            throw new IllegalStateException("resolveCache and TTLs are mutually exclusive");
+            logger.debug("resolveCache and TTLs are mutually exclusive. TTLs are ignored.");
+        }
+
+        if (cnameCache != null && (minTtl != null || maxTtl != null || negativeTtl != null)) {
+            logger.debug("cnameCache and TTLs are mutually exclusive. TTLs are ignored.");
         }
 
         if (authoritativeDnsServerCache != null && (minTtl != null || maxTtl != null || negativeTtl != null)) {
-            throw new IllegalStateException("authoritativeDnsServerCache and TTLs are mutually exclusive");
+            logger.debug("authoritativeDnsServerCache and TTLs are mutually exclusive. TTLs are ignored.");
         }
 
         DnsCache resolveCache = this.resolveCache != null ? this.resolveCache : newCache();

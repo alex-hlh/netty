@@ -25,15 +25,21 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoop;
 import io.netty.channel.ServerChannel;
+import io.netty.channel.socket.ChannelInputShutdownReadComplete;
+import io.netty.channel.socket.ChannelOutputShutdownEvent;
 import io.netty.handler.codec.http2.Http2FrameCodec.DefaultHttp2FrameStream;
+import io.netty.handler.ssl.SslCloseCompletionEvent;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.UnstableApi;
 
-import javax.net.ssl.SSLException;
 import java.util.ArrayDeque;
 import java.util.Queue;
+import javax.net.ssl.SSLException;
 
+import static io.netty.handler.codec.http2.AbstractHttp2StreamChannel.CHANNEL_INPUT_SHUTDOWN_READ_COMPLETE_VISITOR;
+import static io.netty.handler.codec.http2.AbstractHttp2StreamChannel.CHANNEL_OUTPUT_SHUTDOWN_EVENT_VISITOR;
+import static io.netty.handler.codec.http2.AbstractHttp2StreamChannel.SSL_CLOSE_COMPLETION_EVENT_VISITOR;
 import static io.netty.handler.codec.http2.Http2Error.INTERNAL_ERROR;
 import static io.netty.handler.codec.http2.Http2Exception.connectionError;
 
@@ -41,7 +47,7 @@ import static io.netty.handler.codec.http2.Http2Exception.connectionError;
  * An HTTP/2 handler that creates child channels for each stream. This handler must be used in combination
  * with {@link Http2FrameCodec}.
  *
- * <p>When a new stream is created, a new {@link Channel} is created for it. Applications send and
+ * <p>When a new stream is created, a new {@link Http2StreamChannel} is created for it. Applications send and
  * receive {@link Http2StreamFrame}s on the created channel. {@link ByteBuf}s cannot be processed by the channel;
  * all writes that reach the head of the pipeline must be an instance of {@link Http2StreamFrame}. Writes that reach
  * the head of the pipeline are processed directly by this handler and cannot be intercepted.
@@ -65,7 +71,7 @@ import static io.netty.handler.codec.http2.Http2Exception.connectionError;
  * reference counted objects (e.g. {@link ByteBuf}s). The multiplex codec will call {@link ReferenceCounted#retain()}
  * before propagating a reference counted object through the pipeline, and thus an application handler needs to release
  * such an object after having consumed it. For more information on reference counting take a look at
- * https://netty.io/wiki/reference-counted-objects.html
+ * <a href="https://netty.io/wiki/reference-counted-objects.html">the reference counted docs.</a>
  *
  * <h3>Channel Events</h3>
  *
@@ -82,6 +88,15 @@ import static io.netty.handler.codec.http2.Http2Exception.connectionError;
  * window. {@link ChannelHandler}s are free to ignore the channel's writability, in which case the excessive writes will
  * be buffered by the parent channel. It's important to note that only {@link Http2DataFrame}s are subject to
  * HTTP/2 flow control.
+ *
+ * <h3>Closing a {@link Http2StreamChannel}</h3>
+ *
+ * Once you close a {@link Http2StreamChannel} a {@link Http2ResetFrame} will be sent to the remote peer with
+ * {@link Http2Error#CANCEL} if needed. If you want to close the stream with another {@link Http2Error} (due
+ * errors / limits) you should propagate a {@link Http2FrameStreamException} through the {@link ChannelPipeline}.
+ * Once it reaches the end of the {@link ChannelPipeline} it will automatically close the {@link Http2StreamChannel}
+ * and send a {@link Http2ResetFrame} with the unwrapped {@link Http2Error} set. Another possibility is to just
+ * directly write a {@link Http2ResetFrame} to the {@link Http2StreamChannel}l.
  */
 @UnstableApi
 public final class Http2MultiplexHandler extends Http2ChannelDuplexHandler {
@@ -255,6 +270,13 @@ public final class Http2MultiplexHandler extends Http2ChannelDuplexHandler {
                 }
             }
             return;
+        }
+        if (evt == ChannelInputShutdownReadComplete.INSTANCE) {
+            forEachActiveStream(CHANNEL_INPUT_SHUTDOWN_READ_COMPLETE_VISITOR);
+        } else if (evt == ChannelOutputShutdownEvent.INSTANCE) {
+            forEachActiveStream(CHANNEL_OUTPUT_SHUTDOWN_EVENT_VISITOR);
+        } else if (evt == SslCloseCompletionEvent.SUCCESS) {
+            forEachActiveStream(SSL_CLOSE_COMPLETION_EVENT_VISITOR);
         }
         ctx.fireUserEventTriggered(evt);
     }
