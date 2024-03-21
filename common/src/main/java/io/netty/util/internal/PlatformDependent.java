@@ -870,6 +870,9 @@ public final class PlatformDependent {
      * by the caller.
      */
     public static boolean equals(byte[] bytes1, int startPos1, byte[] bytes2, int startPos2, int length) {
+        if (javaVersion() > 8 && (startPos2 | startPos1 | (bytes1.length - length) | bytes2.length - length) == 0) {
+            return Arrays.equals(bytes1, bytes2);
+        }
         return !hasUnsafe() || !unalignedAccess() ?
                   equalsSafe(bytes1, startPos1, bytes2, startPos2, length) :
                   PlatformDependent0.equals(bytes1, startPos1, bytes2, startPos2, length);
@@ -1563,6 +1566,10 @@ public final class PlatformDependent {
         }
         if ("aarch64".equals(value)) {
             return "aarch_64";
+        }
+        if ("riscv64".equals(value)) {
+            // os.detected.arch is riscv64 for RISC-V, no underscore
+            return "riscv64";
         }
         if (value.matches("^(ppc|ppc32)$")) {
             return "ppc_32";
